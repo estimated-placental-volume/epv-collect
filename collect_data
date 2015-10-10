@@ -1,0 +1,194 @@
+#!/usr/bin/env python
+import sys
+from sqlalchemy.engine import create_engine
+from urllib2 import urlopen
+import urllib
+import json
+import time
+from geopy.geocoders import Nominatim
+
+def format_time(t):    
+    return time.strftime("%Y-%m-%d %H:%M:%S UTC",time.gmtime(t))
+
+def format_bool(x):
+    if x == 0:
+        return 'no'
+    if x == 1:
+        return 'yes'
+    return 'NULL'
+
+engine = create_engine('mysql://epv:my_sql_epv_password@127.0.0.1:3306/epv')
+connection = engine.connect()
+
+# Select all of the data...this will not include data about users with no data points:
+result = connection.execute("""
+SELECT user_profile.id,
+       user_profile.dob,
+       user_profile.height,
+       user_profile.weight,
+       user_profile.latitude,
+       user_profile.longitude,
+       user_profile.outcome_date,
+       user_profile.outcome_gender,
+       user_profile.outcome_apgar1,
+       user_profile.outcome_apgar5,
+       user_profile.outcome_cond_0,
+       user_profile.outcome_cond_1,
+       user_profile.outcome_cond_2,
+       user_profile.outcome_cond_3,
+       user_profile.outcome_cond_4,
+       data_point.id,
+       data_point.timestamp,
+       data_point.width,
+       data_point.height,
+       data_point.thickness,
+       data_point.epv,
+       data_point.percentile,
+       data_point.weeks,
+       data_point.days,
+       data_point.mother_weight,
+       data_point.mother_bp_systolic,
+       data_point.mother_bp_diastolic
+FROM data_point
+LEFT JOIN user_profile ON user_profile.id = data_point.profile_id 
+ORDER BY user_profile.id,data_point.timestamp
+""")
+
+# Print the column headers:
+column_names = [
+    "User ID",                     # 0
+    "Mother DOB",                  # 1
+    "Mother Height (in)",          # 2
+    "Mother Initial Weight (lbs)", # 3
+    "User Latitude",               # 4
+    "User Longitude",              # 5
+    "User Location",               # GENERATED
+    "Outcome Date",                # 6
+    "Outcome Weeks",               # GENERATED
+    "Outcome Days",                # GENERATED
+    "Gender",                      # 7
+    "Apgar1",                      # 8
+    "Apgar5",                      # 9
+    "Healthy",                     # 10
+    "Neonatal ICU",                # 11
+    "Premature",                   # 12
+    "Intrauterine Fetal Demise",   # 13
+    "Neonatal Death",              # 14
+    "Data Point ID",               # 15
+    "Data Point Date",             # 16
+    "Width (cm)",                  # 17
+    "Height (cm)",                 # 18
+    "Thickness (cm)",              # 19
+    "EPV",                         # 20
+    "Percentile",                  # 21
+    "Weeks",                       # 22
+    "Days",                        # 23
+    "Mother Weight (lbs)",         # 24
+    "Mother BP Systolic",          # 25
+    "Mother BP Diastolic"          # 26
+]
+
+geolocator = Nominatim()
+
+try: 
+    f = open("location_cache.json", "r")
+    with f:
+        location_cache = json.load(f)
+except:
+    # Make a new cache:
+    location_cache = {}
+
+count = 0
+print "\t".join(column_names)
+sys.stderr.write("\t".join(column_names) + "\n")
+for row in result:
+    values = []
+
+    values.append('NULL' if row[0] is None else row[0]) # User ID
+    values.append('NULL' if row[1] is None else format_time(row[1])) # Mother DOB
+    values.append('NULL' if row[2] is None else row[2]) # Mother height
+    values.append('NULL' if row[3] is None else row[3]) # Mother weight inital
+    values.append('NULL' if row[4] is None else row[4]) # Latitude
+    values.append('NULL' if row[5] is None else row[5]) # Longitude
+
+    # Generate human readable location:
+    latitude = row[4]
+    longitude = row[5]
+    if latitude is None or longitude is None or (latitude == 0.0 and longitude == 0.0):
+        values.append('NULL')
+    else:
+        latlongstr = "{}, {}".format(latitude,longitude)
+        if latlongstr in location_cache:
+            location = location_cache[latlongstr]
+        else:
+            location = geolocator.reverse(latlongstr)
+
+        try:
+            location = str(location)
+
+            # Successful lookup, save the location:
+            location_cache[latlongstr] = location
+        except TypeError as ex:
+            sys.stderr.write("Location Error ({}): {}\n".format(latlongstr, location.raw))
+            location = 'NULL'
+        values.append(location)
+
+    values.append('NULL' if row[6] is None else format_time(row[6])) # Outcome date
+
+    # Generate human readable weeks, days for the outcome:
+    # We can only do this if the data point has timestamp, weeks, and days fields. If not, these two columns are NULL:
+    if row[6] is None or row[16] is None or row[22] is None or row[23] is None:
+        values.append('NULL')
+        values.append('NULL')
+    else:
+        outcome_total_days = (row[6] - row[16]) / (24.0*60*60) + (7*row[22] + row[23])
+        outcome_weeks = int(outcome_total_days / 7)
+        outcome_days = int(outcome_total_days - outcome_weeks*7)
+
+        values.append(outcome_weeks)
+        values.append(outcome_days)
+
+    # Generate a gender:
+    if row[7] == 0:
+        values.append('male')
+    elif row[7] == 1:
+        values.append('female')
+    elif row[7] == 2:
+        values.append('other')
+    else:
+        values.append('NULL')
+
+    values.append('NULL' if row[8] is None else row[8]) # Apgar1
+    values.append('NULL' if row[9] is None else row[9]) # Apgar5
+    values.append(format_bool(row[10])) # Healthy
+    values.append(format_bool(row[11])) # Neonatal ICO
+    values.append(format_bool(row[12])) # Premature
+    values.append(format_bool(row[13])) # Intrauterine Fetal Demise
+    values.append(format_bool(row[14])) # Neonatal Death
+    values.append('NULL' if row[15] is None else row[15]) # Neonatal Death
+    values.append('NULL' if row[16] is None else format_time(row[16])) # Data Point Date
+    values.append('NULL' if row[17] is None else row[17]) # Width
+    values.append('NULL' if row[18] is None else row[18]) # Height
+    values.append('NULL' if row[19] is None else row[19]) # Thickness
+    values.append('NULL' if row[20] is None else row[20]) # EPV
+    values.append('NULL' if row[21] is None else row[21]) # Percentile
+    values.append('NULL' if row[22] is None else row[22]) # Weeks
+    values.append('NULL' if row[23] is None else row[23]) # Days
+    values.append('NULL' if row[24] is None else row[24]) # Mother Weight
+    values.append('NULL' if row[25] is None else row[25]) # Mother BP Systolic
+    values.append('NULL' if row[26] is None else row[26]) # Mother BP Diastolic
+
+    # Print output:
+    
+    print "\t".join([str(v) for v in values])
+    # sys.stderr.write("\t".join([str(v) for v in row]) + "\n")
+    sys.stderr.write("\t".join([str(v) for v in values]) + "\n")
+    count += 1
+
+sys.stderr.write("All done\n")
+sys.stderr.write("Processed total of {} data points\n".format(count))
+print "\n"
+
+
+with open("location_cache.json", "w+") as f:
+    json.dump(location_cache, f)
